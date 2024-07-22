@@ -8,3 +8,7 @@ export async function createClient() {
     });
     return client;
 }
+
+export function createPostText(toAcct: string, text: string) {
+    return `@${toAcct} ${text}`;
+}

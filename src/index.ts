@@ -1,19 +1,8 @@
 import { serve } from "std/http/server.ts";
 import { NotestockWebhookBodySceheme } from "./type.ts";
-import { createClient } from "./mastodon/api.ts";
+import { createClient, createPostText } from "./mastodon/api.ts";
 import { config } from "./config.ts";
-import { generateChatCompletion } from "./openai/api.ts";
-import {
-    checkSecretInUrl,
-    getRandomActor,
-    removeMentionFromText,
-    removeSignatureFromText,
-    stripHtml,
-} from "./util.ts";
-import {
-    createPostTextFromCompletion,
-    getPosterType,
-} from "./mastodon/util.ts";
+import { checkSecretInUrl, getDiceNumbers, roll, stripHtml } from "./util.ts";
 import { getAcctFromAttributedTo, getPostIdFromUrl } from "./notestock/util.ts";
 
 serve(async (req: Request): Promise<Response> => {
@@ -45,7 +34,9 @@ serve(async (req: Request): Promise<Response> => {
     const postIsReply = !!post.tag.find((tag) => tag.type === "Mention");
     if (postIsReply) {
         const postIsReplyToBot = post.tag.find(
-            (tag) => tag.type === "Mention" && tag.name === "@" + config.MASTODON_BOT_ACCT
+            (tag) =>
+                tag.type === "Mention" &&
+                tag.name === "@" + config.MASTODON_BOT_ACCT
         );
         if (!postIsReplyToBot) {
             console.log("post is reply, but not to bot");
@@ -63,64 +54,16 @@ serve(async (req: Request): Promise<Response> => {
     }
 
     // この時点で、投稿はbotへのリプライか、リプライではない投稿
+    const numbers = getDiceNumbers(postContent);
+    const result = roll(...numbers);
 
     // ランダムにリプライする
     if (postIsReply) {
         // リプライなら必ず返信する
-
-        const context = await botClient.v1.statuses.fetchContext(
-            getPostIdFromUrl(post.url)
-        );
-
-        const { actor, completion } = await (async () => {
-            if (context.ancestors.length === 0) {
-                // コンテキストがないのでいまの投稿を最初のものとして扱う
-                const actor = getRandomActor(stripHtml(post.content));
-                const completion = await generateChatCompletion({
-                    posts: [
-                        {
-                            text: stripHtml(post.content),
-                            by: "user",
-                        },
-                    ],
-                    actor,
-                });
-                return { actor, completion };
-
-            } else {
-                // actorを決めるための初期投稿を取得する
-                const actor = getRandomActor(stripHtml(context.ancestors[0].content));
-                const completion = await generateChatCompletion({
-                    posts: [
-                        ...context.ancestors.map((post) => ({
-                            // removeSignatureFromTextは、BOT_USE_SIGNATURES設定によらず呼び出す
-                            text: removeSignatureFromText(
-                                actor.signature,
-                                stripHtml(post.content)
-                            ),
-                            by: getPosterType(post),
-                        })),
-                        {
-                            text: postContent,
-                            by: "user",
-                        },
-                    ],
-                    actor,
-                });
-                return { actor, completion };
-            }
-        })()
-
-        if (!completion) {
-            console.error("completion is empty");
-            return new Response(null);
-        }
-
         await botClient.v1.statuses.create({
-            status: createPostTextFromCompletion(
-                actor.signature,
+            status: createPostText(
                 getAcctFromAttributedTo(post.attributedTo),
-                removeMentionFromText(completion)
+                result
             ),
             inReplyToId: getPostIdFromUrl(post.url),
             visibility: "unlisted",
@@ -152,35 +95,10 @@ serve(async (req: Request): Promise<Response> => {
             return new Response(null);
         }
 
-        // ランダムにやめる
-        const rand = Math.random();
-        // 確率でやめる、ただしデバッグモードなら必ずパスする
-        if (rand < config.LUCK_PERCENTAGE && !config.DEBUG_FORCE_REPLY) {
-            console.log("don't bother now. (no luck)");
-            return new Response(null);
-        }
-
-        const actor = getRandomActor(postContent);
-        const completion = await generateChatCompletion({
-            posts: [
-                {
-                    text: postContent,
-                    by: "user",
-                },
-            ],
-            actor,
-        });
-
-        if (!completion) {
-            console.error("completion is empty");
-            return new Response(null);
-        }
-
         await botClient.v1.statuses.create({
-            status: createPostTextFromCompletion(
-                actor.signature,
+            status: createPostText(
                 getAcctFromAttributedTo(post.attributedTo),
-                removeMentionFromText(completion)
+                result
             ),
             inReplyToId: getPostIdFromUrl(post.url),
             visibility: "unlisted",
